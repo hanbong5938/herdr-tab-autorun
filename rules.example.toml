@@ -1,0 +1,75 @@
+# Herdr Tab Autorun example configuration.
+# Copy this file to the plugin config directory as rules.toml, then edit it.
+# The config directory is printed by:
+#   herdr plugin config-dir han.tab-autorun
+
+[defaults]
+# Whether tabs autorun when no matching rule selects another behavior.
+enabled = true
+# Maximum time to wait for the new pane's interactive shell, in milliseconds.
+ready_timeout_ms = 8000
+# Delay between shell-readiness checks, in milliseconds.
+poll_interval_ms = 60
+# Total time budget for the tab.created hook, in milliseconds.
+total_timeout_ms = 15000
+# Maximum autoruns allowed in one rate-limit window.
+rate_limit_count = 5
+# Length of the rate-limit window, in milliseconds.
+rate_limit_window_ms = 10000
+
+# Rules are checked from top to bottom; the first matching rule wins.
+[[rules]]
+# A human-readable name for this rule.
+name = "backend command"
+
+[rules.when]
+# Exact repository name to match.
+repo_name = "backend"
+# Exact repository root to match.
+repo_root = "/Users/han/workspace/platform/backend"
+# Match the focused pane cwd (or workspace cwd) with *, **, ?, and a leading ~/.
+cwd_glob = "~/workspace/**"
+# Match the tab label with a regular expression.
+tab_label = "^scratch"
+# Exact workspace label; arrays accept any listed value.
+workspace_label = ["backend", "frontend"]
+# Exact invocation source; arrays accept any listed value.
+invocation_source = ["api"]
+# Require a regular, non-linked worktree.
+is_linked_worktree = false
+
+[rules.run]
+# Command mode sends this trusted shell command text to the new tab's root pane.
+mode = "command"
+command = "lazygit"
+
+# This rule demonstrates starting a coding agent.
+[[rules]]
+name = "frontend agent"
+
+[rules.when]
+repo_name = ["frontend", "web"]
+workspace_label = "frontend"
+invocation_source = "api"
+is_linked_worktree = true
+
+[rules.run]
+# Agent mode starts the requested agent kind in the root pane.
+mode = "agent"
+kind = "omp"
+# If omitted, the runtime uses kind as the name prefix and adds its pane suffix.
+name = "omp"
+# Arguments are appended after the agent command's -- separator.
+agent_args = ["--no-session"]
+# Optional prompt sent to the started agent.
+prompt = "summarize repo"
+
+# This rule demonstrates explicitly skipping autorun.
+[[rules]]
+name = "scratch tabs stay quiet"
+
+[rules.when]
+tab_label = "^manual"
+
+[rules.run]
+mode = "skip"

@@ -1,0 +1,31 @@
+id = "han.tab-autorun"
+name = "Tab Autorun"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+description = "Automatically run a command or start an agent when a new tab is created"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["npm", "ci", "--omit=dev", "--ignore-scripts"]
+
+[[events]]
+on = "tab.created"
+command = ["node", "src/autorun.mjs"]
+
+[[actions]]
+id = "doctor"
+title = "Autorun doctor"
+contexts = ["tab"]
+command = ["node", "src/actions/doctor.mjs"]
+
+[[actions]]
+id = "run-here"
+title = "Run autorun on this tab"
+contexts = ["tab"]
+command = ["node", "src/actions/run-here.mjs"]
+
+[[actions]]
+id = "init-config"
+title = "Create starter config"
+contexts = ["workspace"]
+command = ["node", "src/actions/init-config.mjs"]

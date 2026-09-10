@@ -1,0 +1,16 @@
+{
+  "name": "herdr-tab-autorun",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "check": "node --check src/config.mjs && node --check src/herdr.mjs && node --check src/autorun.mjs && node --check src/actions/doctor.mjs && node --check src/actions/run-here.mjs && node --check src/actions/init-config.mjs",
+    "test": "node --test test/config.test.mjs test/state.test.mjs"
+  },
+  "dependencies": {
+    "smol-toml": "1.8.0"
+  }
+}
