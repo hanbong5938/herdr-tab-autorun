@@ -3,9 +3,8 @@ import path from "node:path";
 import { loadConfig, normalizeConfig } from "../config.mjs";
 import { buildContext, decide } from "../autorun.mjs";
 import {
+  herdr,
   herdrBin,
-  paneHasAgent,
-  paneList,
   paneProcessInfo,
   stateDir,
 } from "../herdr.mjs";
@@ -68,10 +67,25 @@ function main() {
   console.log(`  pane id: ${paneId || "(unresolved)"}`);
   if (paneId) {
     console.log(`  process info: ${printValue(paneProcessInfo(paneId))}`);
-    console.log(`  has agent: ${paneHasAgent(paneId) ? "true" : "false"}`);
+    const result = herdr(["pane", "list"]);
+    const panes = result.json?.result?.panes;
+    if (!result.ok) {
+      const error = result.json?.error;
+      const reason = error
+        ? (typeof error === "string" ? error : printValue(error))
+        : result.stderr || `pane list failed (status ${result.status ?? "unavailable"})`;
+      console.log(`  has agent: unknown (${reason})`);
+    } else if (!Array.isArray(panes)) {
+      console.log("  has agent: unknown (pane list returned no panes array)");
+    } else {
+      const pane = panes.find((item) => item && item.pane_id === paneId);
+      console.log(pane
+        ? `  has agent: ${pane.agent !== null && pane.agent !== undefined && pane.agent !== ""}`
+        : "  has agent: unknown (pane not found in pane list)");
+    }
   } else {
     console.log("  process info: null");
-    console.log("  has agent: false");
+    console.log("  has agent: unknown (pane id unresolved)");
   }
 
   // loadConfig errors represent a parse failure. Normalization errors are

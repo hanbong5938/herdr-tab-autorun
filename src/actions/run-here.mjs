@@ -3,8 +3,8 @@ import path from "node:path";
 import { loadConfig, normalizeConfig } from "../config.mjs";
 import { buildContext, decide } from "../autorun.mjs";
 import {
+  herdr,
   paneHasAgent,
-  paneList,
   runCommand,
   sendPrompt,
   startAgent,
@@ -15,20 +15,46 @@ function configDirectory() {
   return process.env.HERDR_PLUGIN_CONFIG_DIR || path.join(process.cwd(), "config");
 }
 
-function resolvePaneId(context, deadlineAt) {
-  if (process.env.HERDR_PANE_ID) {
-    return process.env.HERDR_PANE_ID;
-  }
+function validId(value) {
+  return typeof value === "string" && value.length > 0 && value.trim() === value;
+}
 
-  const focusedPaneId = context?.focused_pane_id || context?.raw_context?.focused_pane_id;
-  if (focusedPaneId) {
-    return focusedPaneId;
-  }
+function snapshotId(raw, mirror) {
+  if (raw !== undefined && raw !== null && !validId(raw)) return null;
+  if (mirror !== undefined && mirror !== null && !validId(mirror)) return null;
+  if (raw != null && mirror != null && raw !== mirror) return null;
+  return raw ?? mirror ?? null;
+}
 
-  const panes = paneList(context?.workspace_id, { deadlineAt });
-  const tabId = context?.tab_id;
-  const pane = panes.find((entry) => entry && entry.tab_id === tabId && entry.pane_id);
-  return pane?.pane_id || context?.pane_id || null;
+function resolveTarget(context) {
+  const raw = context.raw_context;
+  const paneId = snapshotId(raw.focused_pane_id, process.env.HERDR_PANE_ID);
+  const tabId = snapshotId(raw.tab_id, process.env.HERDR_TAB_ID);
+  const workspaceId = snapshotId(raw.workspace_id, process.env.HERDR_WORKSPACE_ID);
+  if (!paneId || !tabId || !workspaceId) return null;
+  return { paneId, tabId, workspaceId };
+}
+
+function scopedPane(target, deadlineAt) {
+  if (remainingMs(deadlineAt) <= 0) {
+    console.log("failed: total timeout expired");
+    return false;
+  }
+  const response = herdr(["pane", "get", target.paneId], { deadlineAt });
+  const pane = response.json?.result?.pane;
+  if (
+    !response.ok ||
+    !pane ||
+    typeof pane !== "object" ||
+    Array.isArray(pane) ||
+    pane.pane_id !== target.paneId ||
+    pane.tab_id !== target.tabId ||
+    pane.workspace_id !== target.workspaceId
+  ) {
+    console.log("failed: selected pane is unavailable or outside the invocation scope");
+    return false;
+  }
+  return true;
 }
 
 function configErrors(loaded, normalized) {
@@ -47,8 +73,9 @@ function remainingMs(deadlineAt) {
   return Math.max(0, deadlineAt - Date.now());
 }
 
-function runRule(paneId, rule, ruleIndex, defaults, deadlineAt) {
+function runRule(target, rule, ruleIndex, defaults, deadlineAt) {
   const run = rule.run || {};
+  const paneId = target?.paneId;
   const mode = run.mode;
   console.log(`rule: ${rule.name} (index ${ruleIndex})`);
   console.log(`mode: ${mode}`);
@@ -62,12 +89,16 @@ function runRule(paneId, rule, ruleIndex, defaults, deadlineAt) {
     console.log("failed: total timeout expired");
     return 1;
   }
+  if (!target) {
+    console.log("failed: could not resolve pane id, tab id, and workspace id for this invocation");
+    return 1;
+  }
 
+  if (!scopedPane(target, deadlineAt)) return 1;
   if (paneHasAgent(paneId, { deadlineAt })) {
     console.log("did: nothing (pane already has an agent)");
     return 0;
   }
-
 
   if (mode === "command") {
     const command = run.command;
@@ -91,10 +122,7 @@ function runRule(paneId, rule, ruleIndex, defaults, deadlineAt) {
       return 1;
     }
 
-    if (remainingMs(deadlineAt) <= 0) {
-      console.log("failed: total timeout expired");
-      return 1;
-    }
+    if (!scopedPane(target, deadlineAt)) return 1;
     console.log(`command: ${JSON.stringify(command)}`);
     const result = runCommand(paneId, command, {
       timeoutMs: remainingMs(deadlineAt),
@@ -116,6 +144,11 @@ function runRule(paneId, rule, ruleIndex, defaults, deadlineAt) {
     }
     const name = run.name || kind;
     const agentArgs = Array.isArray(run.agent_args) ? run.agent_args : [];
+    if (remainingMs(deadlineAt) <= 3000) {
+      console.log("failed: not enough time remains to start agent");
+      return 1;
+    }
+    if (!scopedPane(target, deadlineAt)) return 1;
     const agentTimeoutMs = remainingMs(deadlineAt);
     if (agentTimeoutMs <= 3000) {
       console.log("failed: not enough time remains to start agent");
@@ -135,10 +168,7 @@ function runRule(paneId, rule, ruleIndex, defaults, deadlineAt) {
     }
 
     if (typeof run.prompt === "string" && run.prompt.length > 0) {
-      if (remainingMs(deadlineAt) <= 0) {
-        console.log("failed: total timeout expired before prompt");
-        return 1;
-      }
+      if (!scopedPane(target, deadlineAt)) return 1;
       console.log(`prompt: ${JSON.stringify(run.prompt)}`);
       const prompted = sendPrompt(paneId, run.prompt, {
         timeoutMs: remainingMs(deadlineAt),
@@ -181,13 +211,7 @@ function main() {
     return 1;
   }
 
-  const paneId = resolvePaneId(context, deadlineAt);
-  if (!paneId) {
-    console.log("failed: could not resolve pane id for this tab");
-    return 1;
-  }
-
-  return runRule(paneId, decision.rule, decision.index, defaults, deadlineAt);
+  return runRule(resolveTarget(context), decision.rule, decision.index, defaults, deadlineAt);
 }
 
 try {

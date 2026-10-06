@@ -88,7 +88,11 @@ function hasOwn(value, key) {
 }
 
 function isTable(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
+  if (value === null || typeof value !== "object") {
+    return false;
+  }
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function configErrorLine(error) {
@@ -465,7 +469,7 @@ function matchesWhen(when, ctx) {
     }
 
     if (key === "is_linked_worktree") {
-      if (when[key] !== Boolean(ctx.is_linked_worktree)) {
+      if (when[key] !== ctx.is_linked_worktree) {
         return false;
       }
       continue;
