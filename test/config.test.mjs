@@ -109,6 +109,95 @@ test("all predicates must pass and a mismatched pane cwd does not use workspace 
   assert.ok(matchingRule(normalized, withoutPaneCwd));
 });
 
+test("worktree predicates require actual boolean status and preserve first-match fallback", () => {
+  const normalized = normalizeConfig({
+    rules: [
+      { name: "linked", when: { is_linked_worktree: true }, run: { mode: "skip" } },
+      { name: "unlinked", when: { is_linked_worktree: false }, run: { mode: "skip" } },
+      { name: "fallback", run: { mode: "command", command: "echo fallback" } },
+    ],
+  });
+  assert.equal(normalized.errors.length, 0);
+
+  for (const [status, expected] of [
+    [true, "linked"],
+    [false, "unlinked"],
+    [undefined, "fallback"],
+    [null, "fallback"],
+    [0, "fallback"],
+    [1, "fallback"],
+    ["false", "fallback"],
+  ]) {
+    const context = status === undefined ? {} : { is_linked_worktree: status };
+    assert.equal(matchingRule(normalized, context)?.rule.name, expected);
+  }
+});
+
+test("only plain and null-prototype objects are configuration tables", () => {
+  const table = (entries) => Object.assign(Object.create(null), entries);
+  const normalized = normalizeConfig(table({
+    defaults: table({ enabled: false }),
+    rules: [table({
+      when: table({ repo_name: "protected" }),
+      run: table({ mode: "skip" }),
+    })],
+  }));
+  assert.equal(normalized.errors.length, 0);
+  assert.equal(normalized.defaults.enabled, false);
+  assert.equal(matchingRule(normalized, table({ repo_name: "protected" }))?.rule.run.mode, "skip");
+
+  const customTable = Object.assign(Object.create({ inherited: true }), { mode: "skip", repo_name: "protected" });
+  for (const rejected of [new Date("2024-01-01"), [], customTable]) {
+    assert.ok(normalizeConfig(rejected).errors.length > 0);
+    assert.ok(normalizeConfig({ defaults: rejected }).errors.length > 0);
+    assert.equal(normalizeConfig({ rules: [rejected] }).rules.length, 0);
+    assert.equal(normalizeConfig({ rules: [{ when: rejected, run: { mode: "skip" } }] }).rules.length, 0);
+    assert.equal(normalizeConfig({ rules: [{ when: {}, run: rejected }] }).rules.length, 0);
+  }
+  assert.equal(matchingRule(normalized, customTable), null);
+});
+
+test("parsed TOML dates cannot stand in for defaults, when, or run tables", () => {
+  const defaults = normalizeConfig(parseToml(`
+defaults = 2024-01-01
+[[rules]]
+[rules.run]
+mode = "skip"
+`));
+  assert.ok(defaults.errors.length > 0);
+  assert.equal(defaults.defaults.enabled, true);
+  assert.equal(defaults.rules.length, 1);
+
+  const when = normalizeConfig(parseToml(`
+[[rules]]
+name = "date predicate"
+when = 2024-01-01
+[rules.run]
+mode = "skip"
+[[rules]]
+name = "fallback"
+[rules.run]
+mode = "command"
+command = "echo fallback"
+`));
+  assert.ok(when.errors.length > 0);
+  assert.equal(when.rules.length, 1);
+  assert.equal(matchingRule(when, {})?.rule.name, "fallback");
+
+  const run = normalizeConfig(parseToml(`
+[[rules]]
+name = "date action"
+run = 2024-01-01
+[[rules]]
+name = "fallback"
+[rules.run]
+mode = "skip"
+`));
+  assert.ok(run.errors.length > 0);
+  assert.equal(run.rules.length, 1);
+  assert.equal(matchingRule(run, {})?.rule.name, "fallback");
+});
+
 test("cwd globs with **/ match zero directories and nested directories", () => {
   const normalized = normalizeConfig({
     rules: [
@@ -211,21 +300,29 @@ mode = "skip"
 });
 
 test("autorun hook rejects invalid rules before attempting Herdr", (t) => {
-  const root = temporaryDirectory("herdr-config-hook-");
-  const configDir = path.join(root, "config");
-  const stateDir = path.join(root, "state");
-  fs.mkdirSync(configDir, { recursive: true });
-  fs.mkdirSync(stateDir, { recursive: true });
-  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-
-  fs.writeFileSync(
-    path.join(configDir, "rules.toml"),
-    `
-[[rules]]
+  const invalidRules = [
+    `[[rules]]
 name = "invalid restrictive skip"
 whne = { repo_name = "protected" }
 [rules.run]
-mode = "skip"
+mode = "skip"`,
+    `[[rules]]
+name = "date condition"
+when = 2024-01-01
+[rules.run]
+mode = "skip"`,
+  ];
+  for (const invalidRule of invalidRules) {
+    const root = temporaryDirectory("herdr-config-hook-");
+    const configDir = path.join(root, "config");
+    const stateDir = path.join(root, "state");
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.mkdirSync(stateDir, { recursive: true });
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+    fs.writeFileSync(
+      path.join(configDir, "rules.toml"),
+      `${invalidRule}
 
 [[rules]]
 name = "broad command"
@@ -233,49 +330,50 @@ name = "broad command"
 mode = "command"
 command = "echo SHOULD_NOT_RUN"
 `,
-    "utf8",
-  );
+      "utf8",
+    );
 
-  const result = spawnSync(process.execPath, [hookPath], {
-    cwd: repoRoot,
-    env: {
-      ...process.env,
-      HERDR_BIN_PATH: path.join(root, "missing", "herdr"),
-      HERDR_PLUGIN_CONFIG_DIR: configDir,
-      HERDR_PLUGIN_STATE_DIR: stateDir,
-      HERDR_PLUGIN_EVENT: "tab.created",
-      HERDR_PLUGIN_CONTEXT_JSON: JSON.stringify({
-        workspace_id: "workspace",
-        workspace_cwd: "/workspace",
-        tab_id: "tab-invalid-config",
-        focused_pane_id: "pane-invalid-config",
-        focused_pane_cwd: "/workspace/protected",
-      }),
-      HERDR_PLUGIN_EVENT_JSON: JSON.stringify({
-        event: "tab.created",
-        data: {
-          tab: {
-            tab_id: "tab-invalid-config",
-            workspace_id: "workspace",
+    const result = spawnSync(process.execPath, [hookPath], {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        HERDR_BIN_PATH: path.join(root, "missing", "herdr"),
+        HERDR_PLUGIN_CONFIG_DIR: configDir,
+        HERDR_PLUGIN_STATE_DIR: stateDir,
+        HERDR_PLUGIN_EVENT: "tab.created",
+        HERDR_PLUGIN_CONTEXT_JSON: JSON.stringify({
+          workspace_id: "workspace",
+          workspace_cwd: "/workspace",
+          tab_id: "tab-invalid-config",
+          focused_pane_id: "pane-invalid-config",
+          focused_pane_cwd: "/workspace/protected",
+        }),
+        HERDR_PLUGIN_EVENT_JSON: JSON.stringify({
+          event: "tab.created",
+          data: {
+            tab: {
+              tab_id: "tab-invalid-config",
+              workspace_id: "workspace",
+            },
           },
-        },
-      }),
-      HERDR_WORKSPACE_ID: "workspace",
-      HERDR_TAB_ID: "tab-invalid-config",
-      HERDR_PANE_ID: "pane-invalid-config",
-    },
-    encoding: "utf8",
-    timeout: 5_000,
-    maxBuffer: 2 * 1024 * 1024,
-  });
+        }),
+        HERDR_WORKSPACE_ID: "workspace",
+        HERDR_TAB_ID: "tab-invalid-config",
+        HERDR_PANE_ID: "pane-invalid-config",
+      },
+      encoding: "utf8",
+      timeout: 5_000,
+      maxBuffer: 2 * 1024 * 1024,
+    });
 
-  assert.equal(result.status, 1);
-  const output = `${result.stdout || ""}\n${result.stderr || ""}`;
-  assert.match(output, /\"msg\":\"config_error\"/);
-  assert.doesNotMatch(output, /\"msg\":\"injection_failed\"/);
-  assert.doesNotMatch(output, /\"msg\":\"autorun\"/);
-  assert.doesNotMatch(output, /\"msg\":\"no_pane\"/);
-  assert.doesNotMatch(output, /SHOULD_NOT_RUN/);
+    assert.equal(result.status, 1);
+    const output = `${result.stdout || ""}\n${result.stderr || ""}`;
+    assert.match(output, /\"msg\":\"config_error\"/);
+    assert.doesNotMatch(output, /\"msg\":\"injection_failed\"/);
+    assert.doesNotMatch(output, /\"msg\":\"autorun\"/);
+    assert.doesNotMatch(output, /\"msg\":\"no_pane\"/);
+    assert.doesNotMatch(output, /SHOULD_NOT_RUN/);
+  }
 });
 
 test("loadConfig reports malformed TOML without throwing", (t) => {

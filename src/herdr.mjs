@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import fsExt from "fs-ext";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -369,32 +370,62 @@ function claimMarker(key) {
   return `claim-${hashText(key)}`;
 }
 
-function acquireRateLock(lockPath) {
-  const deadline = Date.now() + RATE_LOCK_TIMEOUT_MS;
-  while (Date.now() <= deadline) {
-    try {
-      return fs.openSync(lockPath, "wx");
-    } catch (error) {
-      if (!error || error.code !== "EEXIST") {
+function acquireRateLock(lockPath, deadlineAt) {
+  const deadline = Math.min(Date.now() + RATE_LOCK_TIMEOUT_MS, deadlineAt);
+  if (Date.now() >= deadlineAt) {
+    return null;
+  }
+  let descriptor;
+  try {
+    descriptor = fs.openSync(lockPath, "a+");
+    while (Date.now() <= deadline) {
+      if (Date.now() >= deadlineAt) {
         return null;
       }
-      sleepSync(Math.min(RATE_LOCK_POLL_MS, Math.max(0, deadline - Date.now())));
+      try {
+        fsExt.flockSync(descriptor, "exnb");
+        if (Date.now() >= deadlineAt) {
+          fsExt.flockSync(descriptor, "un");
+          return null;
+        }
+        const acquired = descriptor;
+        descriptor = null;
+        return acquired;
+      } catch (error) {
+        if (error?.code !== "EAGAIN" && error?.code !== "EWOULDBLOCK") {
+          return null;
+        }
+        sleepSync(Math.min(RATE_LOCK_POLL_MS, Math.max(0, deadline - Date.now())));
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  } finally {
+    if (descriptor !== null && descriptor !== undefined) {
+      try {
+        fs.closeSync(descriptor);
+      } catch {
+        // Failed acquisition must not leave an open descriptor.
+      }
     }
   }
-  return null;
 }
 
-function releaseRateLock(lockPath, descriptor) {
+function releaseRateLock(descriptor) {
+  let released = true;
   try {
-    fs.closeSync(descriptor);
+    fsExt.flockSync(descriptor, "un");
   } catch {
-    // Continue removing the lock marker.
+    released = false;
+  } finally {
+    try {
+      fs.closeSync(descriptor);
+    } catch {
+      released = false;
+    }
   }
-  try {
-    fs.unlinkSync(lockPath);
-  } catch {
-    // A concurrent cleanup or filesystem failure is harmless here.
-  }
+  return released;
 }
 
 /** Return the plugin state directory path. */
@@ -446,6 +477,12 @@ export function rateLimit(options = {}) {
   const windowMs = typeof settings.windowMs === "number" && !Number.isNaN(settings.windowMs)
     ? settings.windowMs
     : DEFAULT_RATE_WINDOW_MS;
+  const deadlineAt = typeof settings.deadlineAt === "number" && Number.isFinite(settings.deadlineAt)
+    ? settings.deadlineAt
+    : Infinity;
+  if (Date.now() >= deadlineAt) {
+    return false;
+  }
   const directory = stateDir();
   if (!ensureDirectory(directory)) {
     log("error", "cannot create rate-limit directory");
@@ -462,13 +499,16 @@ export function rateLimit(options = {}) {
     return false;
   }
 
-  const descriptor = acquireRateLock(lockPath);
+  const descriptor = acquireRateLock(lockPath, deadlineAt);
   if (descriptor === null) {
     log("error", "cannot acquire rate-limit lock");
     return false;
   }
 
   try {
+    if (Date.now() >= deadlineAt) {
+      return false;
+    }
     let recorded = [];
     try {
       const raw = fs.readFileSync(ratePath, "utf8");
@@ -484,11 +524,17 @@ export function rateLimit(options = {}) {
     }
 
     const now = Date.now();
+    if (now >= deadlineAt) {
+      return false;
+    }
     const recent = recorded.filter((timestamp) => now - timestamp <= windowMs);
     if (recent.length >= count) {
       return false;
     }
 
+    if (Date.now() >= deadlineAt) {
+      return false;
+    }
     recent.push(now);
     const temporaryPath = `${ratePath}.${process.pid}.${rateTempSequence++}.tmp`;
     try {
@@ -505,7 +551,10 @@ export function rateLimit(options = {}) {
     }
     return true;
   } finally {
-    releaseRateLock(lockPath, descriptor);
+    if (!releaseRateLock(descriptor)) {
+      log("error", "cannot release rate-limit lock");
+      return false;
+    }
   }
 }
 

@@ -1,12 +1,15 @@
 id = "han.tab-autorun"
 name = "Tab Autorun"
-version = "0.1.0"
+version = "0.1.1"
 min_herdr_version = "0.9.0"
 description = "Automatically run a command or start an agent when a new tab is created"
 platforms = ["linux", "macos"]
 
 [[build]]
 command = ["npm", "ci", "--omit=dev", "--ignore-scripts"]
+
+[[build]]
+command = ["npm", "rebuild", "fs-ext", "--ignore-scripts=false"]
 
 [[events]]
 on = "tab.created"

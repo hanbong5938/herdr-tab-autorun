@@ -16,6 +16,10 @@ const childCode = `
 import fs from "node:fs";
 import path from "node:path";
 import { claimTab, rateLimit } from ${JSON.stringify(herdrModuleUrl)};
+const fixedNow = process.env.HERDR_TEST_NOW;
+if (fixedNow) {
+  Date.now = () => Number(fixedNow);
+}
 
 const barrier = process.env.HERDR_TEST_BARRIER;
 const childId = process.env.HERDR_TEST_ID;
@@ -36,7 +40,11 @@ let result;
 if (action === "claim") {
   result = claimTab(key);
 } else if (action === "rate") {
-  result = rateLimit({ count, windowMs });
+  result = rateLimit({
+    count,
+    windowMs,
+    deadlineAt: process.env.HERDR_TEST_DEADLINE ? Number(process.env.HERDR_TEST_DEADLINE) : undefined,
+  });
 } else if (action === "both") {
   result = { claim: claimTab(key), rate: rateLimit({ count, windowMs }) };
 } else {
@@ -45,7 +53,17 @@ if (action === "claim") {
 process.stdout.write(JSON.stringify(result));
 `;
 
-function launchChild({ stateDir, socketPath, key, action, count = 3, windowMs = 10_000, barrier, id }) {
+const lockHolderCode = `
+import fs from "node:fs";
+import fsExt from "fs-ext";
+
+const descriptor = fs.openSync(process.env.HERDR_TEST_LOCK_PATH, "a+");
+fsExt.flockSync(descriptor, "exnb");
+process.stdout.write("LOCKED\\n");
+setInterval(() => {}, 1000);
+`;
+
+function launchChild({ stateDir, socketPath, key, action, count = 3, windowMs = 10_000, barrier, id, deadlineAt, now }) {
   const child = spawn(process.execPath, ["--input-type=module", "-e", childCode], {
     cwd: repoRoot,
     env: {
@@ -58,6 +76,8 @@ function launchChild({ stateDir, socketPath, key, action, count = 3, windowMs = 
       HERDR_TEST_ACTION: action,
       HERDR_TEST_COUNT: String(count),
       HERDR_TEST_WINDOW_MS: String(windowMs),
+      HERDR_TEST_DEADLINE: deadlineAt === undefined ? "" : String(deadlineAt),
+      HERDR_TEST_NOW: now === undefined ? "" : String(now),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -100,6 +120,47 @@ function launchChild({ stateDir, socketPath, key, action, count = 3, windowMs = 
   activeChildren.add(record);
   return record;
 }
+function launchLockHolder(lockPath) {
+  const child = spawn(process.execPath, ["--input-type=module", "-e", lockHolderCode], {
+    cwd: repoRoot,
+    env: { ...process.env, HERDR_TEST_LOCK_PATH: lockPath },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  const record = { child, promise: null };
+  record.promise = new Promise((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", (code, signal) => {
+      activeChildren.delete(record);
+      resolve({ code, signal });
+    });
+  });
+  record.promise.catch(() => {});
+  activeChildren.add(record);
+  const ready = new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`lock holder did not become ready: ${stderr}`)), 15_000);
+    const finish = (error) => {
+      clearTimeout(timeout);
+      if (error) reject(error);
+      else resolve();
+    };
+    child.stdout.setEncoding("utf8");
+    child.stdout.once("data", (chunk) => {
+      if (chunk.includes("LOCKED\n")) finish();
+      else finish(new Error(`unexpected lock holder readiness: ${chunk}`));
+    });
+    record.promise.then(
+      ({ code, signal }) => finish(new Error(`lock holder exited before readiness (${code ?? signal}): ${stderr}`)),
+      finish,
+    );
+  });
+  return { ...record, ready };
+}
+
 
 async function waitForChildrenReady(barrier, count) {
   const deadline = Date.now() + 15_000;
@@ -223,5 +284,51 @@ test("regular-file state fails closed for claim and rate-limited execution", asy
 
     assert.ok(results.every((result) => result && result.claim === false && result.rate === false));
     assert.equal(results.filter((result) => result.claim || result.rate).length, 0);
+  });
+});
+
+test("a live native lock cannot be stolen, but SIGKILL releases it for the next rate operation", async () => {
+  await withTemporaryRoot(async (root) => {
+    const stateDir = path.join(root, "state");
+    await fsp.mkdir(stateDir);
+    const ratePath = path.join(stateDir, "rate.json");
+    const original = JSON.stringify([Date.now()]);
+    await fsp.writeFile(ratePath, original);
+    const holder = launchLockHolder(path.join(stateDir, "rate.json.lock"));
+    await holder.ready;
+
+    assert.equal(await launchChild({ stateDir, socketPath: "", action: "rate" }).promise, false);
+    assert.equal(await fsp.readFile(ratePath, "utf8"), original);
+    assert.equal(await launchChild({
+      stateDir, socketPath: "", action: "rate", deadlineAt: Date.now() + 500,
+    }).promise, false);
+    assert.equal(await fsp.readFile(ratePath, "utf8"), original);
+
+    holder.child.kill("SIGKILL");
+    assert.equal((await holder.promise).signal, "SIGKILL");
+    assert.equal(await launchChild({ stateDir, socketPath: "", action: "rate" }).promise, true);
+    assert.equal(JSON.parse(await fsp.readFile(ratePath, "utf8")).length, 2);
+  });
+});
+
+test("legacy empty lock file allows seeded rolling-window state and rejects expired deadlines", async () => {
+  await withTemporaryRoot(async (root) => {
+    const stateDir = path.join(root, "state");
+    await fsp.mkdir(stateDir);
+    const ratePath = path.join(stateDir, "rate.json");
+    await fsp.writeFile(path.join(stateDir, "rate.json.lock"), "");
+    const now = Date.now() + 60_000;
+    const original = JSON.stringify([now - 1000, now - 1001]);
+    await fsp.writeFile(ratePath, original);
+    const request = { stateDir, socketPath: "", action: "rate", count: 2, windowMs: 1000, now };
+
+    assert.equal(await launchChild({ ...request, deadlineAt: now }).promise, false);
+    assert.equal(await fsp.readFile(ratePath, "utf8"), original);
+    assert.equal(await launchChild(request).promise, true);
+    assert.deepEqual(JSON.parse(await fsp.readFile(ratePath, "utf8")), [now - 1000, now]);
+    assert.equal(await launchChild(request).promise, false);
+    await fsp.writeFile(ratePath, JSON.stringify([now - 1001]));
+    assert.equal(await launchChild({ ...request, count: 1 }).promise, true);
+    assert.deepEqual(JSON.parse(await fsp.readFile(ratePath, "utf8")), [now]);
   });
 });

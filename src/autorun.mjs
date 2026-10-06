@@ -232,6 +232,7 @@ function runHook() {
       !rateLimit({
         count: defaults.rate_limit_count,
         windowMs: defaults.rate_limit_window_ms,
+        deadlineAt,
       })
     ) {
       logSkip("rate_limited", ctx, "warn");
