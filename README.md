@@ -1,71 +1,86 @@
 # Herdr Tab Autorun
 
-## What it does
+## Who it's for
 
-Herdr Tab Autorun runs a configured command or starts a configured coding agent automatically when Herdr creates a new tab. Automatic runs target that tab's initial pane. The manual `run-here` action instead targets the pane selected when the action is invoked. Rules can match the repository, workspace, tab label, invocation source, worktree, or pane working directory.
+Use this plugin if you want a **trusted, explicitly scoped** command or coding agent to start in the initial pane of each *new* Herdr tab in a chosen repository. `run-here` is a separate manual action for the pane selected when invoked; it is useful for trying the rule before opening another tab. Automatic runs do not occur on pane splits or restored tabs.
+
+If you only need occasional starts, invoke a command or agent manually instead. Herdr also has [native agent automation](https://herdr.dev/docs/agent-automation/); consider that first if its workflow fits. This plugin overlaps with it but provides rules for commands as well as agents, with repository/worktree/pane-context matching; it does not claim complete equivalence with native automation.
 
 ## Requirements
 
-- Herdr 0.9.0 or newer for the existing plugin features.
-- Node.js 18 or newer, with npm available (Herdr does not install or guarantee Node.js for you).
-- Runtime dependencies `smol-toml` and **required native** `fs-ext@2.1.1`. Building `fs-ext` requires a working node-gyp toolchain, including Python and a C/C++ compiler with the platform's development tools. Install these on the machine running the plugin build.
-- macOS is the verified runtime platform; Linux is listed in the manifest but remains unverified here. Windows is unsupported because it does not provide a usable foreground-process signal for the readiness check.
+- Herdr 0.9.0 or newer; Node.js 18 or newer and npm available. Herdr does not install or guarantee Node.js.
+- The plugin build needs `smol-toml` and **required native** `fs-ext@2.1.1`. Building `fs-ext` requires a working node-gyp toolchain (Python, a C/C++ compiler, and platform development tools). Rebuild the native addon after switching Node versions; linking does not ensure the existing build matches Node's ABI.
+- macOS is verified. Linux is listed in the manifest but unverified here. Windows is unsupported: the foreground-process readiness check needs a signal unavailable there. Store plugin state on a local filesystem supporting advisory locks, not NFS.
 
 ## Install
-
-Install from a plugin source with:
 
 ```sh
 herdr plugin install hanbong5938/herdr-tab-autorun
 ```
 
-For local development, install production dependencies with the same scoped build steps as the plugin manifest, then link the checkout:
+### First success: opt in one repository
 
-```sh
-npm ci --omit=dev --ignore-scripts
-npm rebuild fs-ext --ignore-scripts=false
-herdr plugin link .
-```
+1. From the workspace you intend to use, find the **real** plugin config directory:
 
-The first step disables dependency lifecycle scripts; the second builds only the required native addon. Do not replace these with a blanket scripts-enabled install. If the native rebuild fails, install the node-gyp prerequisites above before linking or running the plugin.
+   ```sh
+   herdr plugin config-dir han.tab-autorun
+   ```
 
-### Local verification
+   In that directory, `rules.toml` is the file to edit. Optionally invoke the workspace action `herdr plugin action invoke han.tab-autorun.init-config` to create it from [`rules.example.toml`](rules.example.toml). The starter has `enabled = true` but **all rules are commented**, so it has no effect until you opt in. The initializer does not overwrite an existing `rules.toml` (including its rule order, bytes, or permissions); if it already exists, inspect and edit it in place rather than replacing it.
 
-After the dependency installation above, run the local checks:
+2. In a tab in your intended workspace, invoke the tab action and inspect its `context` and `decision` in the completed log:
 
-```sh
-npm run check
-npm test
-```
+   ```sh
+   herdr plugin action invoke han.tab-autorun.doctor
+   herdr plugin log list --plugin han.tab-autorun
+   ```
 
-See [`test/README.md`](test/README.md) for the test and smoke-test notes.
+   `doctor` reports the actual `repo_name`, `repo_root`, `cwd`, and worktree status available to matching, plus config errors and the selected rule. With no rules yet, `no_rule_match` is expected. Copy the **actual** `repo_name` from its context; do not assume the folder or project display name is the match key. If `repo_name` is absent, use an available `cwd` from that context to choose a specific `cwd_glob` instead (for example, `cwd_glob = "/absolute/path/to/your/repo"` for that exact cwd); do **not** strip away every predicate. If another repository has the same `repo_name`, add a further predicate such as a verified `repo_root`, `workspace_label`, or specific `cwd_glob`, checking it in every intended context. All predicates in one `[rules.when]` must match.
 
-## Configuration
+3. Review the shell command and its portability **in the new pane's actual shell**. Then edit only the starter's commented **`repo proof`** block: replace `YOUR_REPO_NAME` with the observed name, and uncomment its `[[rules]]`, `name`, `[rules.when]`, `repo_name`, `[rules.run]`, `mode`, and `command` lines. Leave the other sample blocks commented. Its harmless proof command is `echo HERDR_TAB_AUTORUN_PROOF`, which needs no external executable or agent installation and has no setup side effects. If using a `cwd_glob` because there is no `repo_name`, replace that one predicate *within the proof block* with your verified cwd scope. Avoid broad `when`-less rules. A matching proof rule can cover both ordinary and linked worktrees of the same repository; test each from its actual context. To restrict either type explicitly, add `is_linked_worktree = true` or `false` only after checking status. In an **existing** configuration, keep its rules and first-match order: a prior blanket linked-worktree `skip` will still win. Reorder or remove that skip **only if you deliberately choose** to opt linked worktrees in; do not silently change it.
 
-Find the plugin configuration directory with:
+   For example, the uncommented proof block looks like this after substituting the exact name reported by doctor:
 
-```sh
-herdr plugin config-dir han.tab-autorun
-```
+   ```toml
+   [[rules]]
+   name = "repo proof"
+   [rules.when]
+   repo_name = "YOUR_ACTUAL_REPO_NAME"
+   [rules.run]
+   mode = "command"
+   command = "echo HERDR_TAB_AUTORUN_PROOF"
+   ```
 
-Create a file named `rules.toml` in that directory. A commented starting point is provided in [`rules.example.toml`](rules.example.toml).
 
-### Key reference
+4. Invoke `doctor` again in a tab whose context should match. Require `decision: action: run`, `reason: matched`, and the intended rule; inspect its command before running. Repeat in a tab from another repository and expect `no_rule_match` (or your deliberate skip). Doctor is a matching diagnostic, **not** a guarantee of shell readiness, execution, agent completion, or rate/claim availability. Focus the intended pane in the matching tab, then manually try:
+
+   ```sh
+   herdr plugin action invoke han.tab-autorun.run-here
+   herdr plugin log list --plugin han.tab-autorun
+   ```
+
+   Action invoke exit 0 means dispatched, **not** completed: use the returned `log.log_id` to find its completed `succeeded` or `failed` record in the log list, and inspect the **selected pane's output** for the proof marker. Echoed command text can appear as terminal input before it executes; seeing only the typed `echo HERDR_TAB_AUTORUN_PROOF` is not proof of execution. Confirm the command's resulting marker output.
+
+5. In the same opted-in workspace/repository, create a **fresh tab** using Herdr's usual new-tab UI (or, if you already know your workspace ID, `herdr tab create --workspace YOUR_WORKSPACE_ID --cwd /absolute/path/to/your/repo`), then inspect the plugin log and its **initial pane's resulting output**. A tab in another repository should remain unaffected. New-tab dispatch targets the initial pane, whereas `run-here` targets the selected pane. A matched automatic attempt can still be blocked by readiness, an existing agent, a once-only claim, or the automatic rate limit. Do not mistake a command echoed as input for its resulting output; do not type into or move the pane until the attempt completes. To check linked worktrees too, repeat in a new tab in that linked worktree; doctor each context rather than assuming metadata.
+
+**Stop both manual and automatic runs:** set `enabled = false` under `[defaults]` in the same `rules.toml`. A disabled config is diagnostic, not a reason to delete state or the lock file. Review and restore `enabled = true` only when ready to resume.
+
+## Configuration reference
 
 Configuration uses `smol-toml`. Tables and inline tables must be plain TOML tables: TOML date/time values are not condition tables. Strings, numbers, booleans, arrays, and multiline values are supported where their keys permit them. A parse or validation error anywhere in `rules.toml` blocks the **entire invocation** rather than running an otherwise valid rule.
 
-#### Defaults
+### Defaults
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `defaults.enabled` | boolean | `true` | Enable or disable automatic runs by default. |
-| `defaults.ready_timeout_ms` | integer | `8000` | Maximum time to wait for the new pane's interactive shell. |
+| `defaults.enabled` | boolean | `true` | Enable or disable both automatic and manual runs. |
+| `defaults.ready_timeout_ms` | integer | `8000` | Maximum time to wait for the targeted pane's interactive shell. |
 | `defaults.poll_interval_ms` | integer | `60` | Delay between shell-readiness checks. |
-| `defaults.total_timeout_ms` | integer | `15000` | Total time budget for the autorun hook. |
+| `defaults.total_timeout_ms` | integer | `15000` | Total time budget for an invocation. |
 | `defaults.rate_limit_count` | integer | `5` | Maximum automatic runs allowed in one rate-limit window. |
 | `defaults.rate_limit_window_ms` | integer | `10000` | Length of the rate-limit window. |
 
-#### Rules and matching
+### Rules and matching
 
 Each `[[rules]]` block may provide a `name` and may contain `[rules.when]`; `[rules.run]` is required. Rules are evaluated in file order. **The first rule whose every `when` predicate passes wins.** An empty `when` table matches every context. A `when` key may be a string or an array of strings where noted; array values match any listed value. Unknown keys or type errors invalidate the entire invocation; the hook fails closed.
 
@@ -80,7 +95,7 @@ Each `[[rules]]` block may provide a `name` and may contain `[rules.when]`; `[ru
 | `rules.when.invocation_source` | string or array of strings | Exact invocation-source match. |
 | `rules.when.is_linked_worktree` | boolean | Exact linked-worktree status match: `true` matches only true, `false` only false. Unknown status matches neither. |
 
-#### Run modes
+### Run modes
 
 The selected rule's `[rules.run]` table chooses one operation:
 
@@ -139,13 +154,37 @@ description = "autorun this tab"
 
 ## Troubleshooting
 
-Inspect captured hook output with:
+Use `herdr plugin action invoke han.tab-autorun.doctor` from the affected tab, then find its completed log with `herdr plugin log list --plugin han.tab-autorun`. Read the printed config path, errors, context, selected rule, and pane readiness before changing anything. A successful action-dispatch exit status is not proof that the plugin action finished.
+
+| Observation | Recovery |
+| --- | --- |
+| `config exists: no` or no rules after initialization | Run the workspace `init-config` action or create `rules.toml` in the directory reported by `herdr plugin config-dir han.tab-autorun`. The starter is inert until a reviewed scoped rule is uncommented. |
+| `no_rule_match` | Compare the rule against doctor's *actual* `repo_name`, `cwd`, worktree status and other context. Check earlier rules and test each intended worktree. A missing `repo_name` needs a verified available scope such as `cwd_glob`, not an unconditional rule. |
+| `disabled` | `defaults.enabled = false` stops **both** manual and automatic effects. Enable only when ready; also inspect a matching `mode = "skip"` rule, which yields `rule_skip`. |
+| `blocked` / `config_invalid` | Doctor exits 1 on any parse or validation error, even in a later rule; fix every reported error in the existing file before trying again. Missing config, no match, disabled, and explicit skip are benign diagnostics (doctor exits 0), not configuration failures. |
+| `pane_busy`, readiness timeout, or no resulting output | Stop typing or starting other processes in that pane, allow its interactive shell to become idle, and try `run-here` again in the intended selected pane. The shell heuristic cannot promise prompt readiness; inspect completed logs and actual pane output. Automatic once-only claims and the rate limit may prevent a retry on the same new tab; manual runs bypass those two guards, not readiness or existing-agent protection. |
+| Plugin install/build fails at `fs-ext`, or the addon fails to load after a Node switch | Install Python, a C/C++ compiler, platform development tools, and a matching Node/npm toolchain; rebuild only `fs-ext` for the Node version running the plugin. Do not replace the scoped build with blanket lifecycle scripts. |
+
+Doctor's `has agent: unknown` means the pane ID or pane-list result could not establish the fact (for example, the pane is missing or the query failed); it does **not** mean `false`. Only a resolved pane's actual agent field supports a `true` or `false` diagnosis. Do **not** delete `rate.json.lock` to troubleshoot: locks attach to its inode, and a crashed process releases its lock automatically.
+
+## Development and local checks
+
+For a local checkout, install production dependencies with the same scoped build steps as the plugin manifest, then link it:
 
 ```sh
-herdr plugin log list --plugin han.tab-autorun
+npm ci --omit=dev --ignore-scripts
+npm rebuild fs-ext --ignore-scripts=false
+herdr plugin link .
 ```
 
-You can also run the **Autorun doctor** action from a tab to inspect the autorun setup for that tab. A reported `has agent: unknown` means the pane ID or pane-list result could not establish the fact (for example, the pane is missing or the query failed); it does **not** mean `false`. Only a resolved pane's actual agent field supports a `true` or `false` diagnosis.
+The first command disables dependency lifecycle scripts; the second builds only the required native addon. If it fails, install the node-gyp prerequisites above before linking or running the plugin. Rebuild after changing Node versions. With dependencies installed, local checks are:
+
+```sh
+npm run check
+npm test
+```
+
+See [`test/README.md`](test/README.md) for test and live smoke-test guidance; these developer checks are not required for the first scoped proof.
 
 ## Marketplace publishing
 

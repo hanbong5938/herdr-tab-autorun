@@ -10,6 +10,41 @@ import { loadConfig, matchRule, normalizeConfig, parseToml } from "../src/config
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const hookPath = path.join(repoRoot, "src", "autorun.mjs");
+const doctorPath = path.join(repoRoot, "src", "actions", "doctor.mjs");
+
+function runDoctor(t, rules, context = {}) {
+  const root = temporaryDirectory("herdr-config-doctor-");
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configDir = path.join(root, "config");
+  fs.mkdirSync(configDir);
+  if (rules !== null) {
+    fs.writeFileSync(path.join(configDir, "rules.toml"), rules, "utf8");
+  }
+
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (/^HERDR_/u.test(key)) delete env[key];
+  }
+  Object.assign(env, {
+    HERDR_BIN_PATH: path.join(root, "missing-herdr"),
+    HERDR_PLUGIN_CONFIG_DIR: configDir,
+    HERDR_PLUGIN_STATE_DIR: path.join(root, "state"),
+    HERDR_PLUGIN_CONTEXT_JSON: JSON.stringify(context),
+  });
+  return spawnSync(process.execPath, [doctorPath], {
+    cwd: root,
+    env,
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+}
+
+function assertDoctorDecision(result, status, action, reason, matchedRule = "none") {
+  assert.equal(result.status, status, result.stderr);
+  assert.match(result.stdout, new RegExp(`^  action: ${action}$`, "mu"));
+  assert.match(result.stdout, new RegExp(`^  reason: ${reason}$`, "mu"));
+  assert.match(result.stdout, new RegExp(`^  matched rule: ${matchedRule}$`, "mu"));
+}
 
 function matchingRule(normalized, context) {
   return matchRule(normalized.rules, context);
@@ -385,4 +420,101 @@ test("loadConfig reports malformed TOML without throwing", (t) => {
   assert.equal(loaded.exists, true);
   assert.ok(loaded.errors.length > 0);
   assert.equal(typeof loaded.errors[0], "string");
+});
+
+test("doctor blocks invalid configuration even after a matching command", (t) => {
+  const command = `[[rules]]
+name = "first command"
+when = { repo_name = "chosen" }
+[rules.run]
+mode = "command"
+command = "echo SHOULD_NOT_RUN"
+`;
+  const context = { worktree: { repo_name: "chosen" } };
+  for (const rules of [
+    `[defaults]
+enabled = "yes"
+
+${command}`,
+    `${command}
+
+[[rules]]
+name = "invalid later rule"
+whne = { repo_name = "other" }
+[rules.run]
+mode = "skip"
+`,
+    `${command}
+
+[[rules]]
+name = "invalid later rule"
+when = 12
+[rules.run]
+mode = "skip"
+`,
+    `${command}
+
+[[rules]]
+name = "invalid later rule"
+[rules.run]
+mode = "skip"
+extra = true
+`,
+  ]) {
+    const result = runDoctor(t, rules, context);
+    assertDoctorDecision(result, 1, "blocked", "config_invalid");
+  }
+});
+
+test("doctor blocks malformed and unreadable configuration", (t) => {
+  assertDoctorDecision(runDoctor(t, "[rules\n"), 1, "blocked", "config_invalid");
+  const root = temporaryDirectory("herdr-config-doctor-unreadable-");
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const configDir = path.join(root, "config");
+  fs.mkdirSync(configDir);
+  fs.mkdirSync(path.join(configDir, "rules.toml"));
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (/^HERDR_/u.test(key)) delete env[key];
+  }
+  Object.assign(env, {
+    HERDR_BIN_PATH: path.join(root, "missing-herdr"),
+    HERDR_PLUGIN_CONFIG_DIR: configDir,
+    HERDR_PLUGIN_STATE_DIR: path.join(root, "state"),
+  });
+  const result = spawnSync(process.execPath, [doctorPath], {
+    cwd: root, env, encoding: "utf8", timeout: 5_000,
+  });
+  assertDoctorDecision(result, 1, "blocked", "config_invalid");
+});
+
+test("doctor reports benign configuration decisions without running effects", (t) => {
+  assertDoctorDecision(runDoctor(t, null), 0, "skip", "no_rule_match");
+  assertDoctorDecision(runDoctor(t, `[[rules]]
+name = "other repository"
+when = { repo_name = "other" }
+[rules.run]
+mode = "command"
+command = "echo ignored"
+`, { worktree: { repo_name: "chosen" } }), 0, "skip", "no_rule_match");
+  assertDoctorDecision(runDoctor(t, `[defaults]
+enabled = false
+
+[[rules]]
+name = "otherwise matching"
+[rules.run]
+mode = "command"
+command = "echo ignored"
+`), 0, "skip", "disabled");
+  assertDoctorDecision(runDoctor(t, `[[rules]]
+name = "intentional skip"
+[rules.run]
+mode = "skip"
+`), 0, "skip", "rule_skip", "intentional skip \\(index 0\\)");
+  assertDoctorDecision(runDoctor(t, `[[rules]]
+name = "matching command"
+[rules.run]
+mode = "command"
+command = "echo ignored"
+`), 0, "run", "matched", "matching command \\(index 0\\)");
 });

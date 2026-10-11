@@ -59,8 +59,11 @@ function main() {
   console.log("context:");
   console.log(JSON.stringify(context, null, 2));
 
-  const decision = decide(context, normalized);
+  const decision = configErrors.length > 0
+    ? { action: "blocked", reason: "config_invalid" }
+    : decide(context, normalized);
   printDecision(decision);
+  console.log("decision describes configuration matching only; it does not confirm runtime readiness or execution.");
 
   const paneId = context?.pane_id || context?.focused_pane_id;
   console.log("pane readiness:");
@@ -88,12 +91,7 @@ function main() {
     console.log("  has agent: unknown (pane id unresolved)");
   }
 
-  // loadConfig errors represent a parse failure. Normalization errors are
-  // diagnostics, but do not make the doctor command fail.
-  const parseFailed = loaded.exists &&
-    Array.isArray(loaded.errors) &&
-    loaded.errors.length > 0;
-  return parseFailed ? 1 : 0;
+  return configErrors.length > 0 ? 1 : 0;
 }
 
 try {
