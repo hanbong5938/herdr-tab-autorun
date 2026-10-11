@@ -1,75 +1,58 @@
 # Herdr Tab Autorun example configuration.
-# Copy this file to the plugin config directory as rules.toml, then edit it.
+# The initializer copies this file to rules.toml in the plugin config directory.
 # The config directory is printed by:
 #   herdr plugin config-dir han.tab-autorun
+# Defaults may enable autorun, but no rule runs until you uncomment a rule below.
 
 [defaults]
-# Whether tabs autorun when no matching rule selects another behavior.
 enabled = true
-# Maximum time to wait for the new pane's interactive shell, in milliseconds.
 ready_timeout_ms = 8000
-# Delay between shell-readiness checks, in milliseconds.
 poll_interval_ms = 60
-# Total time budget for the tab.created hook, in milliseconds.
 total_timeout_ms = 15000
-# Maximum autoruns allowed in one rate-limit window.
 rate_limit_count = 5
-# Length of the rate-limit window, in milliseconds.
 rate_limit_window_ms = 10000
 
-# Rules are checked from top to bottom; the first matching rule wins.
-[[rules]]
-# A human-readable name for this rule.
-name = "backend command"
+# Opt in for one repository: replace YOUR_REPO_NAME with its exact repo name,
+# then uncomment this entire rule. It can match both ordinary and linked
+# worktrees of that repository; add is_linked_worktree only if you want to narrow it.
+# The command runs in the new tab's shell; use only trusted shell command text.
+# [[rules]]
+# name = "repo proof"
+# [rules.when]
+# repo_name = "YOUR_REPO_NAME"
+# [rules.run]
+# mode = "command"
+# command = "echo HERDR_TAB_AUTORUN_PROOF"
 
-[rules.when]
-# Exact repository name to match.
-repo_name = "backend"
-# Exact repository root to match.
-repo_root = "/Users/han/workspace/platform/backend"
-# Match the focused pane cwd (or workspace cwd) with *, **, ?, and a leading ~/.
-cwd_glob = "~/workspace/**"
-# Match the tab label with a regular expression.
-tab_label = "^scratch"
-# Exact workspace label; arrays accept any listed value.
-workspace_label = ["backend", "frontend"]
-# Exact invocation source; arrays accept any listed value.
-invocation_source = ["api"]
-# Require a regular, non-linked worktree.
-is_linked_worktree = false
+# Optional predicates (combine with AND when placed in one rule's [rules.when]):
+# repo_root = "/path/to/repository"       # exact repository root
+# cwd_glob = "~/workspace/**"              # focused pane or workspace cwd; *, **, ?
+# tab_label = "^scratch"                   # regular expression
+# workspace_label = ["backend", "frontend"] # exact label; arrays accept any listed value
+# invocation_source = ["api"]              # exact source; arrays accept any listed value
+# is_linked_worktree = true                # true: linked only; false: ordinary only
+# Rules are checked top to bottom; the first matching rule wins. Put more
+# specific rules before broad rules. No predicate above is active as written.
 
-[rules.run]
-# Command mode sends this trusted shell command text to the new tab's root pane.
-mode = "command"
-command = "lazygit"
+# Optional scoped agent example: uncomment only after choosing your repository
+# and ensuring the agent command is installed and available in the new tab's shell.
+# [[rules]]
+# name = "repo agent"
+# [rules.when]
+# repo_name = "YOUR_REPO_NAME"
+# [rules.run]
+# mode = "agent"
+# kind = "omp"
+# name = "omp"
+# agent_args = ["--no-session"]
+# prompt = "summarize repo"
 
-# This rule demonstrates starting a coding agent.
-[[rules]]
-name = "frontend agent"
-
-[rules.when]
-repo_name = ["frontend", "web"]
-workspace_label = "frontend"
-invocation_source = "api"
-is_linked_worktree = true
-
-[rules.run]
-# Agent mode starts the requested agent kind in the root pane.
-mode = "agent"
-kind = "omp"
-# If omitted, the runtime uses kind as the name prefix and adds its pane suffix.
-name = "omp"
-# Arguments are appended after the agent command's -- separator.
-agent_args = ["--no-session"]
-# Optional prompt sent to the started agent.
-prompt = "summarize repo"
-
-# This rule demonstrates explicitly skipping autorun.
-[[rules]]
-name = "scratch tabs stay quiet"
-
-[rules.when]
-tab_label = "^manual"
-
-[rules.run]
-mode = "skip"
+# Optional scoped skip example: a matching rule explicitly suppresses autorun.
+# Place before the command rule if it should take precedence for these tabs.
+# [[rules]]
+# name = "repo manual tabs"
+# [rules.when]
+# repo_name = "YOUR_REPO_NAME"
+# tab_label = "^manual"
+# [rules.run]
+# mode = "skip"
